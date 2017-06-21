@@ -28,7 +28,7 @@ PACMAN_PACKAGES=(
 )
 BASIC_PACKAGES=(${PACMAN_PACKAGES[*]} filesystem)
 EXTRA_PACKAGES=(coreutils bash grep gawk file tar sed manjaro-release)
-DEFAULT_REPO_URL="https://mirror.netzspielplatz.de/manjaro/packages/"
+DEFAULT_REPO_URL="http://repo.manjaro.org.uk"
 DEFAULT_ARM_REPO_URL="http://mirror.archlinuxarm.org"
 DEFAULT_BRANCH="unstable"
 
