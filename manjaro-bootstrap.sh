@@ -2,7 +2,7 @@
 #
 # manjaro-bootstrap: Bootstrap a base Manjaro Linux system using any GNU distribution.
 #
-# Dependencies: bash >= 4, coreutils, wget, sed, gawk, tar, gzip, chroot, xz.
+# Dependencies: bash >= 4, coreutils, wget, sed, gawk, tar, gzip, chroot, xz, zstd.
 # Project: https://github.com/manjaro/manjaro-bootstrap
 #
 # Install:
@@ -22,18 +22,16 @@ set -e -u -o pipefail
 
 # Packages needed by pacman (see get-pacman-dependencies.sh)
 PACMAN_PACKAGES=(
-  acl archlinux-keyring attr bzip2 curl expat glibc gpgme libarchive
+  acl archlinux-keyring attr brotli bzip2 curl expat glibc gpgme libarchive
   libassuan libgpg-error libnghttp2 libssh2 lzo openssl pacman pacman-mirrors xz zlib
-  krb5 e2fsprogs keyutils libidn gcc-libs lz4 libpsl icu
+  krb5 e2fsprogs keyutils libidn2 libunistring gcc-libs lz4 libpsl icu libunistring zstd
+  ca-certificates-mozilla ca-certificates-utils
 )
 BASIC_PACKAGES=(${PACMAN_PACKAGES[*]} filesystem)
-EXTRA_PACKAGES=(coreutils bash grep gawk file tar sed manjaro-release)
-DEFAULT_REPO_URL="http://repo.manjaro.org.uk"
-DEFAULT_ARM_REPO_URL="http://mirror.archlinuxarm.org"
-DEFAULT_BRANCH="unstable"
-
-# Read from config file is present to override variables
-[ -f config.sh ] && . config.sh
+EXTRA_PACKAGES=(coreutils bash grep gawk file tar systemd sed manjaro-release)
+DEFAULT_REPO_URL="https://uvermont.mm.fcix.net/manjaro/"
+DEFAULT_ARM_REPO_URL="http://repo.manjaro.org.uk destination-64"
+DEFAULT_BRANCH="stable"
 
 stderr() { 
   echo "$@" >&2 
@@ -63,23 +61,25 @@ fetch_file() {
 
 uncompress() {
   local FILEPATH=$1 DEST=$2
-  
+
   case "$FILEPATH" in
     *.gz) 
       tar xzf "$FILEPATH" -C "$DEST";;
     *.xz) 
       xz -dc "$FILEPATH" | tar x -C "$DEST";;
-    *) 
+    *.zst)
+      zstd -dc "$FILEPATH" | tar x -C "$DEST";;
+    *)
       debug "Error: unknown package format: $FILEPATH"
       return 1;;
   esac
-}  
+}
 
 ###
 
 get_default_repo() {
   local ARCH=$1
-  if [[ "$ARCH" == arm* ]]; then
+  if [[ "$ARCH" == arm* || "$ARCH" == aarch64 ]]; then
     echo $DEFAULT_ARM_REPO_URL
   else
     echo $DEFAULT_REPO_URL
@@ -88,7 +88,7 @@ get_default_repo() {
 
 get_core_repo_url() {
   local REPO_URL=$1 ARCH=$2
-  if [[ "$ARCH" == arm* ]]; then
+  if [[ "$ARCH" == arm* || "$ARCH" == aarch64 ]]; then
     echo "${REPO_URL%/}/$ARCH/core"
   else
     echo "${REPO_URL%/}/${DEFAULT_BRANCH}/core/$ARCH"
@@ -97,8 +97,8 @@ get_core_repo_url() {
 
 get_template_repo_url() {
   local REPO_URL=$1 ARCH=$2
-  if [[ "$ARCH" == arm* ]]; then
-    echo "${REPO_URL%/}/$ARCH"
+  if [[ "$ARCH" == arm* || "$ARCH" == aarch64 ]]; then
+    echo "${REPO_URL%/}/$ARCH/\$repo"
   else
     echo "${REPO_URL%/}/${DEFAULT_BRANCH}/\$repo/$ARCH"
   fi
@@ -109,24 +109,30 @@ configure_pacman() {
   debug "configure DNS and pacman"
   cp "/etc/resolv.conf" "$DEST/etc/resolv.conf"
   SERVER=$(get_template_repo_url "$REPO_URL" "$ARCH")
-  echo "Server = $SERVER" >> "$DEST/etc/pacman.d/mirrorlist"
+  echo "Server = $SERVER" > "$DEST/etc/pacman.d/mirrorlist"
 }
 
 configure_minimal_system() {
   local DEST=$1
-  
+
   mkdir -p "$DEST/dev"
-  sed -ie 's/^root:.*$/root:$1$GT9AUpJe$oXANVIjIzcnmOpY07iaGi\/:14657::::::/' $DEST/etc/shadow
+  sed -ie 's/^root:.*$/root:$1$GT9AUpJe$oXANVIjIzcnmOpY07iaGi\/:14657::::::/' "$DEST/etc/shadow"
   touch "$DEST/etc/group"
   echo "bootstrap" > "$DEST/etc/hostname"
-  
+  cat /etc/ca-certificates/extracted/tls-ca-bundle.pem > "$DEST/etc/ca-certificates/extracted/tls-ca-bundle.pem"
+  rm -f "$DEST/etc/mtab"
+  echo "rootfs / rootfs rw 0 0" > "$DEST/etc/mtab"
+  test -e "$DEST/dev/null" || mknod "$DEST/dev/null" c 1 3
+  test -e "$DEST/dev/random" || mknod -m 0644 "$DEST/dev/random" c 1 8
+  test -e "$DEST/dev/urandom" || mknod -m 0644 "$DEST/dev/urandom" c 1 9
+
   sed -i "s/^[[:space:]]*\(CheckSpace\)/# \1/" "$DEST/etc/pacman.conf"
   sed -i "s/^[[:space:]]*SigLevel[[:space:]]*=.*$/SigLevel = Never/" "$DEST/etc/pacman.conf"
 }
 
 fetch_packages_list() {
-  local REPO=$1 
-  
+  local REPO=$1
+
   debug "fetch packages list: $REPO/"
   fetch "$REPO/" | extract_href | awk -F"/" '{print $NF}' | sort -rn ||
     { debug "Error: cannot fetch packages list: $REPO"; return 1; }
@@ -135,12 +141,11 @@ fetch_packages_list() {
 install_pacman_packages() {
   local BASIC_PACKAGES=$1 DEST=$2 LIST=$3 DOWNLOAD_DIR=$4
   debug "pacman package and dependencies: $BASIC_PACKAGES"
-  
   for PACKAGE in $BASIC_PACKAGES; do
-    local FILE=$(echo "$LIST" | grep -m1 "^$PACKAGE-[[:digit:]].*\(\.gz\|\.xz\)$")
+    local FILE=$(echo "$LIST" | grep -m1 "^$PACKAGE-[[:digit:]].*\(\.gz\|\.xz\|\.zst\)$")
     test "$FILE" || { debug "Error: cannot find package: $PACKAGE"; return 1; }
     local FILEPATH="$DOWNLOAD_DIR/$FILE"
-    
+
     debug "download package: $REPO/$FILE"
     fetch_file "$FILEPATH" "$REPO/$FILE"
     debug "uncompress package: $FILEPATH"
@@ -161,7 +166,7 @@ install_packages() {
   local ARCH=$1 DEST=$2 PACKAGES=$3
   debug "install packages: $PACKAGES"
   LC_ALL=C chroot "$DEST" /usr/bin/pacman \
-    --noconfirm --arch $ARCH -Sy --force $PACKAGES
+    --noconfirm --arch $ARCH -Sy --overwrite \* $PACKAGES
 }
 
 show_usage() {
@@ -176,7 +181,7 @@ main() {
   local USE_QEMU=
   local DOWNLOAD_DIR=
   local PRESERVE_DOWNLOAD_DIR=
-  
+
   while getopts "qa:r:d:h" ARG; do
     case "$ARG" in
       a) ARCH=$OPTARG;;
@@ -189,10 +194,11 @@ main() {
   done
   shift $(($OPTIND-1))
   test $# -eq 1 || { show_usage; return 1; }
-  
+  test $EUID -eq 0 || { stderr 'This script must be run with root privileges' ; return 1; }
+
   [[ -z "$ARCH" ]] && ARCH=$(uname -m)
-  [[ -z "$REPO_URL" ]] &&REPO_URL=$(get_default_repo "$ARCH")
-  
+  [[ -z "$REPO_URL" ]] && REPO_URL=$(get_default_repo "$ARCH")
+
   local DEST=$1
   local REPO=$(get_core_repo_url "$REPO_URL" "$ARCH")
   [[ -z "$DOWNLOAD_DIR" ]] && DOWNLOAD_DIR=$(mktemp -d)
@@ -201,7 +207,7 @@ main() {
   debug "destination directory: $DEST"
   debug "core repository: $REPO"
   debug "temporary directory: $DOWNLOAD_DIR"
-  
+
   # Fetch packages, install system and do a minimal configuration
   mkdir -p "$DEST"
   local LIST=$(fetch_packages_list $REPO)
@@ -212,12 +218,11 @@ main() {
   install_packages "$ARCH" "$DEST" "${BASIC_PACKAGES[*]} ${EXTRA_PACKAGES[*]}"
   configure_pacman "$DEST" "$ARCH" # Pacman must be re-configured
   [[ -z "$PRESERVE_DOWNLOAD_DIR" ]] && rm -rf "$DOWNLOAD_DIR"
-  
-  debug "Done"
-  debug "Note: To use the system you may need to mount some special fileystems:"
-  debug "  # mount -t proc proc $DEST/proc/"
-  debug "  # mount -t sysfs sys $DEST/sys/"
-  debug "  # mount -o bind /dev $DEST/dev/"
+
+  debug "Done!"
+  debug
+  debug "You may now chroot or arch-chroot from package arch-install-scripts:"
+  debug "$ sudo arch-chroot $DEST"
 }
 
 # Read from file is present to override functions
