@@ -2,7 +2,8 @@
 #
 # manjaro-bootstrap: Bootstrap a base Manjaro Linux system using any GNU distribution.
 #
-# Dependencies: bash >= 4, coreutils, wget, sed, gawk, tar, gzip, chroot, xz, zstd.
+# Dependencies: bash >= 4, coreutils, wget, sed, gawk, tar, gzip, chroot, xz, zstd, trust
+# valid root certifcate store
 # Project: https://github.com/manjaro/manjaro-bootstrap
 #
 # Install:
@@ -119,7 +120,7 @@ configure_minimal_system() {
   sed -ie 's/^root:.*$/root:$1$GT9AUpJe$oXANVIjIzcnmOpY07iaGi\/:14657::::::/' "$DEST/etc/shadow"
   touch "$DEST/etc/group"
   echo "bootstrap" > "$DEST/etc/hostname"
-  cat /etc/ca-certificates/extracted/tls-ca-bundle.pem > "$DEST/etc/ca-certificates/extracted/tls-ca-bundle.pem"
+  trust extract --comment --format=pem-bundle --filter=ca-anchors --purpose=server-auth  "$DEST/etc/ca-certificates/extracted/tls-ca-bundle.pem"
   rm -f "$DEST/etc/mtab"
   echo "rootfs / rootfs rw 0 0" > "$DEST/etc/mtab"
   test -e "$DEST/dev/null" || mknod "$DEST/dev/null" c 1 3
